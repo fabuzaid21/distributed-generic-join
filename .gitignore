@@ -1,5 +1,11 @@
+# run.sh needs to be configured locally
+run.sh
+# Vim swap file
 *.swp
+# IntelliJ metadata
 .idea
+# Spark jar
 lib/
+# sbt output
 project/
 target/

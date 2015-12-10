@@ -1,0 +1,12 @@
+#!/bin/sh
+
+CWD=`pwd`
+SPARK_HOME=
+TEMP_OUTPUT=
+DATA_FILE=
+
+sbt package
+cd $SPARK_HOME
+bin/spark-submit --class DistributedGenericJoin --master local[2] $CWD/target/scala-2.10/distributed-generic-join_2.10-1.0.jar $CWD/$DATA_FILE "1,2:2,3:1,3" > $CWD/$TEMP_OUTPUT 2> /dev/null
+cd $CWD
+cat $TEMP_OUTPUT && rm $TEMP_OUTPUT
