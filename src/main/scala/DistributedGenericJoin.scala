@@ -147,7 +147,7 @@ object DistributedGenericJoin {
 
     // NOTE: we assume that each relation has the same tuples and
     // only differs in terms of its attributes
-    val attrTupleKV: RDD[(Int, (Int, Tuple))] = tuples.flatMap { arr: Array[Int] =>
+    val attrTupleKV: RDD[((Int, Int), (Int, Tuple))] = tuples.flatMap { arr: Array[Int] =>
       // for each relation in our relations
       relations.zipWithIndex.flatMap { case (relation, relIdx) =>
         // create a Tuple (NOTE: we assume that the relation's attrs
@@ -155,10 +155,10 @@ object DistributedGenericJoin {
         val t: Tuple = Tuple(relation.attributes.sorted.zipWithIndex.map {
           case (attr, idx) => (attr, arr(idx))
         })
-        // we create a key-value pair (attr, (relation Index, Tuple))
+        // we create a key-value pair ((attr, attrVal), (relation Index, Tuple))
         // now, we can partition on the attribute
         relation.attributes.map { attr =>
-          (attr, (relIdx, t))
+          ((attr, t.project(attr)), (relIdx, t))
         }
       }.toIterator
     }
@@ -175,8 +175,8 @@ object DistributedGenericJoin {
     // each (attr, attrVal), Iterator[(relIdx, Tuple)] now gets transformed into a
     // PartitionAttribute for that attribute
     val partitionedAttrs: RDD[PartitionedAttribute] = tuplesPartitionedByAttr.mapPartitions {
-      iter: Iterator[(Int, Iterable[(Int, Tuple)])] =>
-        iter.map { case (attr, relIdxTupleIterable) =>
+      iter: Iterator[((Int, Int), Iterable[(Int, Tuple)])] =>
+        iter.map { case ((attr, attrVal), relIdxTupleIterable) =>
 
           val attrVals: Array[Set[Int]] = Array.fill[Set[Int]](relations.length)(Set[Int]())
           val attrIndexes: Array[Map[Tuple, Set[Int]]] = Array.fill[Map[Tuple,
@@ -184,15 +184,14 @@ object DistributedGenericJoin {
 
 
           relIdxTupleIterable.iterator.foreach { case(relIdx, tuple) =>
-            val attrVal = tuple.project(attr)
-            attrVals(relIdx).add(attrVal)
-            val m: Map[Tuple, Set[Int]] = attrIndexes(relIdx)
-
             val attrsToKeep = relations(relIdx).attributes.takeWhile(x => x != attr)
             val projectedTuple = tuple.partialTuple(attrsToKeep.toSet)
             if (!projectedTuple.isEmpty) {
+              val m: Map[Tuple, Set[Int]] = attrIndexes(relIdx)
               val s: Set[Int] = m.getOrElseUpdate(projectedTuple, Set[Int]())
               s.add(attrVal)
+            } else {
+              attrVals(relIdx).add(attrVal)
             }
           }
           new PartitionedAttribute(attr, attrVals, attrIndexes)
@@ -203,12 +202,16 @@ object DistributedGenericJoin {
     var result = partitionedAttrs.flatMap { partitionedAttribute =>
       // only look at partitionedAttribute that has the very first attribute
       if (partitionedAttribute.attribute == firstAttr) {
-        val intersect = partitionedAttribute.attributeValues.filterNot(x => x.isEmpty).reduce((x, y) => x.intersect(y))
-        .map { x =>
-          val arr = Array((firstAttr, x))
-          Tuple(arr)
+        val candidates = partitionedAttribute.attributeValues.filterNot(x => x.isEmpty)
+        if (candidates.length > 1) {
+          val intersect = candidates.reduce((x, y) => x.intersect(y)).map { x =>
+              val arr = Array((firstAttr, x))
+              Tuple(arr)
+          }
+          intersect.toIterator
+        } else {
+          Iterator()
         }
-        intersect.toIterator
       } else {
         Iterator()
       }
@@ -223,7 +226,7 @@ object DistributedGenericJoin {
         if (partitionedAttribute.attribute == attr) {
           var toReturn = Set[Tuple]()
           tuplesSoFar.value.foreach { t: Tuple =>
-            toReturn = partitionedAttribute.attributeValues.indices.filterNot { relIdx =>
+            val candidates = partitionedAttribute.attributeValues.indices.filterNot { relIdx =>
               partitionedAttribute.attributeValues(relIdx).isEmpty &&
                 partitionedAttribute.attributeIndexes(relIdx).isEmpty
             }.map { relIdx =>
@@ -234,10 +237,13 @@ object DistributedGenericJoin {
                 val key = t.partialTuple(attrsInCommon)
                 partitionedAttribute.attributeIndexes(relIdx).getOrElse(key, Set[Int]())
               }
-            }.reduce((x, y) => x.intersect(y)).map { x =>
-              val arr = t.values :+ (attr, x)
-              Tuple(arr)
-            }.union(toReturn)
+            }
+            if (candidates.length > 1) {
+              toReturn = candidates.reduce((x, y) => x.intersect(y)).map { x =>
+                val arr = t.values :+ (attr, x)
+                Tuple(arr)
+              }.union(toReturn)
+            }
           }
           toReturn.toIterator
         } else {

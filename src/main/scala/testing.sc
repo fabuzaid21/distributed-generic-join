@@ -22,7 +22,7 @@ def loadDataFile(sc: SparkContext, file: String): RDD[Array[Int]] = {
 }
 
 val globalAttrSet = Set[Int]()
-val tuples = loadDataFile(sc, "single_triangle.txt")
+val tuples = loadDataFile(sc, "/Users/fabuzaid21/Documents/MIT/research/distributed-generic-join/datasets/two_triangles.txt")
 val relations = "1,2:2,3:1,3".split(":").map(x => Relation(x.split(",").map { x =>
   val attrVal = x.toInt
   globalAttrSet.add(attrVal)
@@ -30,7 +30,7 @@ val relations = "1,2:2,3:1,3".split(":").map(x => Relation(x.split(",").map { x 
 }
 ))
 
-val globalTotalOrder = Array(2, 1, 3)
+val globalTotalOrder = Array(3, 2, 1)
 
 case class Tuple(val values: Array[(Int, Int)]) {
 
@@ -77,7 +77,7 @@ case class Tuple(val values: Array[(Int, Int)]) {
 // NOTE: we assume that each relation has the same tuples and
 // only differs in terms of its attributes
 //
-val attrTupleKV: RDD[(Int, (Int, Tuple))] = tuples.flatMap { arr: Array[Int] =>
+val attrTupleKV: RDD[((Int, Int), (Int, Tuple))] = tuples.flatMap { arr: Array[Int] =>
   // for each relation in our relations
   relations.zipWithIndex.flatMap { case (relation, relIdx) =>
     // we create a Tuple
@@ -87,7 +87,7 @@ val attrTupleKV: RDD[(Int, (Int, Tuple))] = tuples.flatMap { arr: Array[Int] =>
     // we create a key-value pair (attr, (relation Index, Tuple))
     // now, we can partition on the attribute
     relation.attributes.map { attr =>
-      (attr, (relIdx, t))
+      ((attr, t.project(attr)), (relIdx, t))
     }
   }.toIterator
 }
@@ -105,8 +105,8 @@ case class PartitionedAttribute(attribute: Int, attributeValues: Array[Set[Int]]
                                 attributeIndexes: Array[Map[Tuple, Set[Int]]])
 
 val partitionedAttrs: RDD[PartitionedAttribute] = tuplesPartitionedByAttr.mapPartitions {
-  iter: Iterator[(Int, Iterable[(Int, Tuple)])] =>
-    iter.map { case (attr, relIdxTupleIterable) =>
+  iter: Iterator[((Int, Int), Iterable[(Int, Tuple)])] =>
+    iter.map { case ((attr, attrVal), relIdxTupleIterable) =>
 
       val attrVals: Array[Set[Int]] = Array.fill[Set[Int]](relations.length)(Set[Int]())
       val attrIndexes: Array[Map[Tuple, Set[Int]]] = Array.fill[Map[Tuple,
@@ -114,15 +114,14 @@ val partitionedAttrs: RDD[PartitionedAttribute] = tuplesPartitionedByAttr.mapPar
 
 
       relIdxTupleIterable.iterator.foreach { case(relIdx, tuple) =>
-        val attrVal = tuple.project(attr)
-        attrVals(relIdx).add(attrVal)
-        val m: Map[Tuple, Set[Int]] = attrIndexes(relIdx)
-
         val attrsToKeep = relations(relIdx).attributes.takeWhile(x => x != attr)
         val projectedTuple = tuple.partialTuple(attrsToKeep.toSet)
         if (!projectedTuple.isEmpty) {
+          val m: Map[Tuple, Set[Int]] = attrIndexes(relIdx)
           val s: Set[Int] = m.getOrElseUpdate(projectedTuple, Set[Int]())
           s.add(attrVal)
+        } else {
+          attrVals(relIdx).add(attrVal)
         }
       }
       new PartitionedAttribute(attr, attrVals, attrIndexes)
@@ -134,12 +133,17 @@ val firstAttr = globalTotalOrder(0)
 var result = partitionedAttrs.flatMap { partitionedAttribute =>
   // only look at partitionedAttribute that has the very first attribute
   if (partitionedAttribute.attribute == firstAttr) {
-    val intersect = partitionedAttribute.attributeValues.filterNot(x => x.isEmpty).reduce((x, y) => x.intersect(y))
-      .map { x =>
-        val arr = Array((firstAttr, x))
-        Tuple(arr)
-      }
-    intersect.toIterator
+    val candidates = partitionedAttribute.attributeValues.filterNot(x => x.isEmpty)
+    if (candidates.length > 1) {
+      val intersect = candidates.reduce((x, y) => x.intersect(y))
+        .map { x =>
+          val arr = Array((firstAttr, x))
+          Tuple(arr)
+        }
+      intersect.toIterator
+    } else {
+      Iterator()
+    }
   } else {
     Iterator()
   }
@@ -153,7 +157,7 @@ globalTotalOrder.drop(1).foreach { attr =>
     if (partitionedAttribute.attribute == attr) {
       var toReturn = Set[Tuple]()
       tuplesSoFar.value.foreach { t: Tuple =>
-        toReturn = partitionedAttribute.attributeValues.indices.filterNot { relIdx =>
+        val candidates = partitionedAttribute.attributeValues.indices.filterNot { relIdx =>
           partitionedAttribute.attributeValues(relIdx).isEmpty &&
             partitionedAttribute.attributeIndexes(relIdx).isEmpty
         }.map { relIdx =>
@@ -164,10 +168,13 @@ globalTotalOrder.drop(1).foreach { attr =>
             val key = t.partialTuple(attrsInCommon)
             partitionedAttribute.attributeIndexes(relIdx).getOrElse(key, Set[Int]())
           }
-        }.reduce((x, y) => x.intersect(y)).map { x =>
-          val arr = t.values :+ (attr, x)
-          Tuple(arr)
-        }.union(toReturn)
+        }
+        if (candidates.length > 1) {
+          toReturn = candidates.reduce((x, y) => x.intersect(y)).map { x =>
+            val arr = t.values :+ (attr, x)
+            Tuple(arr)
+          }.union(toReturn)
+        }
       }
       toReturn.toIterator
     } else {
@@ -186,7 +193,7 @@ val foo = partitionedAttrs.flatMap { partitionedAttribute =>
   if (partitionedAttribute.attribute == attr) {
     var toReturn = Set[Tuple]()
     tuplesSoFar.value.foreach { t: Tuple =>
-      toReturn = partitionedAttribute.attributeValues.indices.filterNot { relIdx =>
+      val candidates = partitionedAttribute.attributeValues.indices.filterNot { relIdx =>
         partitionedAttribute.attributeValues(relIdx).isEmpty &&
           partitionedAttribute.attributeIndexes(relIdx).isEmpty
       }.map { relIdx =>
@@ -197,10 +204,13 @@ val foo = partitionedAttrs.flatMap { partitionedAttribute =>
           val key = t.partialTuple(attrsInCommon)
           partitionedAttribute.attributeIndexes(relIdx).getOrElse(key, Set[Int]())
         }
-      }.reduce((x, y) => x.intersect(y)).map { x =>
-        val arr = t.values :+ (attr, x)
-        Tuple(arr)
-      }.union(toReturn)
+      }
+      if (candidates.length > 1) {
+        toReturn = candidates.reduce((x, y) => x.intersect(y)).map { x =>
+          val arr = t.values :+ (attr, x)
+          Tuple(arr)
+        }.union(toReturn)
+      }
     }
     toReturn.toIterator
   } else {
